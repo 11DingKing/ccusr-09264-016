@@ -12,6 +12,8 @@ from contextlib import AbstractContextManager
 from ..domain.models import (
     AuditEntry,
     Blob,
+    ExportBatch,
+    ExportItem,
     Material,
     MaterialVersion,
     Objection,
@@ -148,3 +150,30 @@ class Repository(abc.ABC):
     def list_audit(
         self, package_id: str | None = None, limit: int = 200
     ) -> list[AuditEntry]: ...
+
+    # ---- 受控批量导出 ----
+    @abc.abstractmethod
+    def insert_export_batch(self, batch: ExportBatch) -> None: ...
+
+    @abc.abstractmethod
+    def get_export_batch(self, export_id: str) -> ExportBatch | None: ...
+
+    @abc.abstractmethod
+    def insert_export_item(self, item: ExportItem) -> None: ...
+
+    @abc.abstractmethod
+    def list_export_items(self, export_id: str) -> list[ExportItem]: ...
+
+    @abc.abstractmethod
+    def finalize_export_batch(
+        self,
+        export_id: str,
+        *,
+        status: str,
+        exported: int,
+        denied: int,
+        errors: int,
+        manifest_fingerprint: str,
+        completed_at: str,
+    ) -> None:
+        """导出批次收尾：写入计数与清单指纹（仅 running -> completed）。"""

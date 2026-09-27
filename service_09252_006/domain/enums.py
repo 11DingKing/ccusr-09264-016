@@ -49,3 +49,14 @@ class Decision(str, Enum):
     APPROVED = "approved"
     NEEDS_REVISION = "needs_revision"
     REJECTED = "rejected"
+
+
+class ExportBatchStatus(str, Enum):
+    RUNNING = "running"      # 逐条处理中
+    COMPLETED = "completed"  # 全部记录处置完毕（含被拒/失败条目）
+
+
+class ExportItemStatus(str, Enum):
+    EXPORTED = "exported"  # 授权通过，脱敏后导出
+    DENIED = "denied"      # 授权拒绝：清单不保留任何记录字段
+    ERROR = "error"        # 单条处理异常：不阻塞其他条目

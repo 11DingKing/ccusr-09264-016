@@ -115,6 +115,45 @@ def review_record_fingerprint(
     return ALGORITHM + ":" + digest_json(payload)
 
 
+def export_manifest_fingerprint(
+    export_id: str,
+    package_id: str,
+    items: Iterable[Mapping[str, Any]],
+    completed_at: str,
+) -> str:
+    """受控批量导出清单指纹。
+
+    items 为逐条处置结果（entry_id/status/reason + 授权通过条的
+    脱敏后内容摘要）。对清单整体做规范化哈希，导出结果可离线对账：
+    任何一条处置结果被改动都会改变指纹。
+    """
+    normalized_items = sorted(
+        (
+            {
+                "entry_id": str(i["entry_id"]),
+                "status": str(i["status"]),
+                "reason": (None if i.get("reason") is None else str(i["reason"])),
+                "sha256": (None if i.get("sha256") is None else str(i["sha256"])),
+                "content_sha256": (
+                    None
+                    if i.get("content_text") is None
+                    else digest_bytes(str(i["content_text"]).encode("utf-8"))
+                ),
+            }
+            for i in items
+        ),
+        key=lambda i: i["entry_id"],
+    )
+    payload = {
+        "schema": "quality-evidence-export/v1",
+        "export_id": export_id,
+        "package_id": package_id,
+        "completed_at": completed_at,
+        "items": normalized_items,
+    }
+    return ALGORITHM + ":" + digest_json(payload)
+
+
 def is_valid_digest(value: str) -> bool:
     try:
         algo, hexdigest = value.split(":", 1)

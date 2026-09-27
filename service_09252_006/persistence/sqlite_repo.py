@@ -18,6 +18,8 @@ from ..domain.fingerprint import digest_bytes
 from ..domain.models import (
     AuditEntry,
     Blob,
+    ExportBatch,
+    ExportItem,
     Material,
     MaterialVersion,
     Objection,
@@ -27,7 +29,7 @@ from ..domain.models import (
     User,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SqliteRepository(Repository):
@@ -49,8 +51,12 @@ class SqliteRepository(Repository):
     # ---------------------------------------------------------------- schema
     def _ensure_schema(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if version >= SCHEMA_VERSION:
-            return
+        if version < 1:
+            self._migrate_v1()
+        if version < 2:
+            self._migrate_v2()
+
+    def _migrate_v1(self) -> None:
         # executescript 会自行提交事务；把 user_version 写入放在同一脚本
         self._conn.executescript(
             """
@@ -177,6 +183,47 @@ class SqliteRepository(Repository):
                 );
 
                 PRAGMA user_version = 1;
+            """
+        )
+
+    def _migrate_v2(self) -> None:
+        # 受控批量导出：批次 + 逐条处置清单。
+        # export_items 中被拒/失败的条目只保留 entry_id 与原因码，
+        # 内容字段一律 NULL——清单本身不得泄露未授权记录的字段。
+        self._conn.executescript(
+            """
+                CREATE TABLE IF NOT EXISTS export_batches (
+                    export_id            TEXT PRIMARY KEY,
+                    package_id           TEXT NOT NULL REFERENCES packages(package_id),
+                    institution_id       TEXT NOT NULL,
+                    requested_by         TEXT NOT NULL,
+                    status               TEXT NOT NULL,
+                    total                INTEGER NOT NULL,
+                    exported             INTEGER NOT NULL DEFAULT 0,
+                    denied               INTEGER NOT NULL DEFAULT 0,
+                    errors               INTEGER NOT NULL DEFAULT 0,
+                    manifest_fingerprint TEXT,
+                    created_at           TEXT NOT NULL,
+                    completed_at         TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS export_items (
+                    export_id    TEXT NOT NULL REFERENCES export_batches(export_id),
+                    entry_id     TEXT NOT NULL,
+                    status       TEXT NOT NULL,
+                    kind         TEXT,
+                    sensitivity  TEXT,
+                    title        TEXT,
+                    sha256       TEXT,
+                    size         INTEGER,
+                    media_type   TEXT,
+                    content_text TEXT,
+                    reason       TEXT,
+                    decided_at   TEXT NOT NULL,
+                    PRIMARY KEY (export_id, entry_id)
+                );
+
+                PRAGMA user_version = 2;
             """
         )
 
@@ -667,6 +714,105 @@ class SqliteRepository(Repository):
             for r in rows
         ]
 
+    # ------------------------------------------------------------------ export
+    def insert_export_batch(self, batch: ExportBatch) -> None:
+        self._conn.execute(
+            "INSERT INTO export_batches(export_id, package_id, institution_id,"
+            " requested_by, status, total, exported, denied, errors,"
+            " manifest_fingerprint, created_at, completed_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                batch.export_id,
+                batch.package_id,
+                batch.institution_id,
+                batch.requested_by,
+                batch.status,
+                batch.total,
+                batch.exported,
+                batch.denied,
+                batch.errors,
+                batch.manifest_fingerprint,
+                batch.created_at,
+                batch.completed_at,
+            ),
+        )
+
+    def get_export_batch(self, export_id: str) -> ExportBatch | None:
+        row = self._conn.execute(
+            "SELECT * FROM export_batches WHERE export_id = ?", (export_id,)
+        ).fetchone()
+        return None if row is None else _row_to_export_batch(row)
+
+    def insert_export_item(self, item: ExportItem) -> None:
+        self._conn.execute(
+            "INSERT INTO export_items(export_id, entry_id, status, kind, sensitivity,"
+            " title, sha256, size, media_type, content_text, reason, decided_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                item.export_id,
+                item.entry_id,
+                item.status,
+                item.kind,
+                item.sensitivity,
+                item.title,
+                item.sha256,
+                item.size,
+                item.media_type,
+                item.content_text,
+                item.reason,
+                item.decided_at,
+            ),
+        )
+
+    def list_export_items(self, export_id: str) -> list[ExportItem]:
+        rows = self._conn.execute(
+            "SELECT * FROM export_items WHERE export_id = ? ORDER BY entry_id",
+            (export_id,),
+        ).fetchall()
+        return [
+            ExportItem(
+                export_id=r["export_id"],
+                entry_id=r["entry_id"],
+                status=r["status"],
+                kind=r["kind"],
+                sensitivity=r["sensitivity"],
+                title=r["title"],
+                sha256=r["sha256"],
+                size=r["size"],
+                media_type=r["media_type"],
+                content_text=r["content_text"],
+                reason=r["reason"],
+                decided_at=r["decided_at"],
+            )
+            for r in rows
+        ]
+
+    def finalize_export_batch(
+        self,
+        export_id: str,
+        *,
+        status: str,
+        exported: int,
+        denied: int,
+        errors: int,
+        manifest_fingerprint: str,
+        completed_at: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE export_batches SET status = ?, exported = ?, denied = ?,"
+            " errors = ?, manifest_fingerprint = ?, completed_at = ?"
+            " WHERE export_id = ? AND status = 'running'",
+            (
+                status,
+                exported,
+                denied,
+                errors,
+                manifest_fingerprint,
+                completed_at,
+                export_id,
+            ),
+        )
+
 
 def _row_to_user(row: sqlite3.Row) -> User:
     return User(
@@ -716,4 +862,21 @@ def _row_to_entry(row: sqlite3.Row) -> PackageEntry:
         kind=row["kind"],
         sensitivity=row["sensitivity"],
         added_at=row["added_at"],
+    )
+
+
+def _row_to_export_batch(row: sqlite3.Row) -> ExportBatch:
+    return ExportBatch(
+        export_id=row["export_id"],
+        package_id=row["package_id"],
+        institution_id=row["institution_id"],
+        requested_by=row["requested_by"],
+        status=row["status"],
+        total=row["total"],
+        exported=row["exported"],
+        denied=row["denied"],
+        errors=row["errors"],
+        manifest_fingerprint=row["manifest_fingerprint"],
+        created_at=row["created_at"],
+        completed_at=row["completed_at"],
     )

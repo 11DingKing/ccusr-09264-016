@@ -136,6 +136,51 @@ class Blob:
 
 
 @dataclass
+class ExportBatch:
+    """一次受控批量导出任务。
+
+    逐条记录授权判断的结果写入 ExportItem 清单；批次本身只保存计数与
+    清单指纹，不保存任何记录字段。
+    """
+
+    export_id: str
+    package_id: str
+    institution_id: str
+    requested_by: str
+    status: str                    # ExportBatchStatus
+    total: int
+    exported: int
+    denied: int
+    errors: int
+    manifest_fingerprint: Optional[str]
+    created_at: str
+    completed_at: Optional[str]
+
+
+@dataclass
+class ExportItem:
+    """清单中的一条记录处置结果。
+
+    被拒（denied）/失败（error）的记录只保留 entry_id 与原因码，
+    所有内容字段（kind/title/sha256/content 等）一律为 None——
+    清单本身不得泄露未授权记录的字段。
+    """
+
+    export_id: str
+    entry_id: str
+    status: str                    # ExportItemStatus
+    decided_at: str
+    kind: Optional[str] = None
+    sensitivity: Optional[str] = None
+    title: Optional[str] = None
+    sha256: Optional[str] = None
+    size: Optional[int] = None
+    media_type: Optional[str] = None
+    content_text: Optional[str] = None   # 脱敏后的内容；拒绝时为空
+    reason: Optional[str] = None         # 拒绝/失败的机器可读原因码
+
+
+@dataclass
 class AuditEntry:
     audit_id: str
     package_id: Optional[str]

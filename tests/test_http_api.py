@@ -197,6 +197,84 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
 
+    def test_controlled_batch_export_over_http(self) -> None:
+        admin = self._create_user(
+            "admin-a", ["institution_admin"], "inst-a", "tok-admin"
+        )
+        submitter = self._create_user(
+            "sub-a", ["institution_submitter"], "inst-a", "tok-sub"
+        )
+        outsider = self._create_user(
+            "admin-b", ["institution_admin"], "inst-b", "tok-out"
+        )
+
+        # 一份普通材料 + 一份敏感企业反馈，封存成包
+        def upload(kind, title, sensitivity, content):
+            status, mat = admin.request(
+                "POST", "/v1/materials",
+                {"kind": kind, "title": title, "sensitivity": sensitivity},
+            )
+            self.assertEqual(status, 201)
+            status, ver = admin.request(
+                "POST", f"/v1/materials/{mat['material_id']}/versions",
+                {"content_base64": base64.b64encode(content).decode("ascii")},
+            )
+            self.assertEqual(status, 201)
+            return ver["version_id"]
+
+        normal_v = upload("syllabus", "大纲", "normal", "大纲 v1".encode("utf-8"))
+        secret = "敏感反馈：企业要求匿名".encode("utf-8")
+        sensitive_v = upload(
+            "enterprise_feedback", "企业反馈", "sensitive", secret
+        )
+        status, pkg = admin.request("POST", "/v1/packages", {"title": "导出包"})
+        pid = pkg["package_id"]
+        for vid in (normal_v, sensitive_v):
+            status, _ = admin.request(
+                "POST", f"/v1/packages/{pid}/entries", {"version_id": vid}
+            )
+            self.assertEqual(status, 201)
+        status, _ = admin.request("POST", f"/v1/packages/{pid}/seal", {})
+        self.assertEqual(status, 200)
+
+        # 提交人发起受控批量导出：敏感条目被拒但不阻塞普通条目
+        status, result = submitter.request(
+            "POST", f"/v1/packages/{pid}/export", {},
+            idempotency_key="export-1",
+        )
+        self.assertEqual(status, 201, result)
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["exported"], 1)
+        self.assertEqual(result["denied"], 1)
+
+        # 幂等重放：同一 key 不重复执行
+        status, replay = submitter.request(
+            "POST", f"/v1/packages/{pid}/export", {},
+            idempotency_key="export-1",
+        )
+        self.assertEqual(status, 201)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["export_id"], result["export_id"])
+
+        # 清单：拒绝项不泄露字段，敏感内容不出现在响应里
+        status, manifest = submitter.request(
+            "GET", f"/v1/exports/{result['export_id']}"
+        )
+        self.assertEqual(status, 200)
+        denied = next(i for i in manifest["items"] if i["status"] == "denied")
+        self.assertEqual(denied["reason"], "sensitive_feedback_restricted")
+        for field in ("kind", "title", "sha256", "content_text"):
+            self.assertIsNone(denied[field])
+        self.assertNotIn("敏感反馈", json.dumps(manifest, ensure_ascii=False))
+        exported = next(i for i in manifest["items"] if i["status"] == "exported")
+        self.assertEqual(exported["content_text"], "大纲 v1")
+
+        # 外机构用户：不能发起导出，也不能查看清单
+        status, body = outsider.request("POST", f"/v1/packages/{pid}/export", {})
+        self.assertEqual(status, 403)
+        status, body = outsider.request("GET", f"/v1/exports/{result['export_id']}")
+        self.assertEqual(status, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

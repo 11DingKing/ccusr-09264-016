@@ -394,6 +394,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    # ----------------------------------------------------------- 导出
+    def export_package(self, package_id: str) -> None:
+        actor = self._actor()
+        result = self.services.exports.export_package(
+            actor,
+            package_id=package_id,
+            idempotency_key=self._idempotency_key(),
+        )
+        self._send_json(201, result)
+
+    def get_export(self, export_id: str) -> None:
+        actor = self._actor()
+        self._send_json(200, self.services.exports.get_export(actor, export_id))
+
 
 # 路由表：方法 -> [(路径模式, 处理方法名)]
 def _routes() -> dict[str, list[tuple[str, str]]]:
@@ -409,6 +423,7 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/packages/{package_id}/seal", "seal_package"),
         ("/v1/packages/{package_id}/assignments", "assign"),
         ("/v1/packages/{package_id}/decision", "issue_decision"),
+        ("/v1/packages/{package_id}/export", "export_package"),
         ("/v1/requests/{request_id}/cancel", "cancel_request"),
         ("/v1/requests/{request_id}/respond", "respond_request"),
         ("/v1/requests/{request_id}/objections", "create_objection"),
@@ -420,6 +435,7 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/packages", "list_packages"),
         ("/v1/packages/{package_id}", "get_package"),
         ("/v1/packages/{package_id}/requests", "list_requests"),
+        ("/v1/exports/{export_id}", "get_export"),
         (
             "/v1/packages/{package_id}/entries/{version_id}/content",
             "download_entry",

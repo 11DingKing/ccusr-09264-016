@@ -39,32 +39,56 @@ class DisclosureContext:
         entry: PackageEntry,
         package: ReviewPackage | None = None,
     ) -> bool:
-        user = self.user
-        is_auditor = user.has_role(Role.AUDITOR)
-        is_authority = user.has_role(Role.QUALITY_AUTHORITY)
-        institution = package_institution(entry, package)
-        same_institution = (
-            user.institution_id is not None and user.institution_id == institution
-        )
+        return entry_denial_reason(
+            self.user, self.active_package_ids, entry, package
+        ) is None
 
-        # 全局只读角色
-        if is_auditor or is_authority:
-            return True
 
-        is_sensitive = entry.sensitivity == Sensitivity.SENSITIVE.value
+# 拒绝原因码（机器可读，写入导出清单；不含任何记录字段）
+DENIED_SENSITIVE_RESTRICTED = "sensitive_feedback_restricted"  # 提交人不可见敏感企业反馈
+DENIED_ROLE_NOT_PERMITTED = "role_not_permitted"               # 本机构角色无披露权限
+DENIED_NO_ACTIVE_ASSIGNMENT = "no_active_assignment"           # 评审人无当前有效分配
+DENIED_CROSS_INSTITUTION = "cross_institution"                 # 跨机构且无授权角色
 
-        # 本机构成员视角
-        if same_institution:
-            if user.has_role(Role.INSTITUTION_ADMIN):
-                return True  # 管理员可见本机构全部材料
-            if user.has_role(Role.INSTITUTION_SUBMITTER):
-                return not is_sensitive  # 提交人不见敏感企业反馈
-            return False
 
-        # 跨机构：只有“仍被有效分配到该包”的评审人可见
-        if user.has_role(Role.REVIEWER):
-            return entry.package_id in self.active_package_ids
-        return False
+def entry_denial_reason(
+    user: User,
+    active_request_package_ids: set[str],
+    entry: PackageEntry,
+    package: ReviewPackage | None = None,
+) -> str | None:
+    """逐条授权判断：返回 None 表示可见，否则返回拒绝原因码。
+
+    与 can_see_entry 共用同一份规则实现，供受控批量导出在清单中
+    记录“为什么被拒”（原因码本身不泄露记录字段）。
+    """
+    is_auditor = user.has_role(Role.AUDITOR)
+    is_authority = user.has_role(Role.QUALITY_AUTHORITY)
+    institution = package_institution(entry, package)
+    same_institution = (
+        user.institution_id is not None and user.institution_id == institution
+    )
+
+    # 全局只读角色
+    if is_auditor or is_authority:
+        return None
+
+    is_sensitive = entry.sensitivity == Sensitivity.SENSITIVE.value
+
+    # 本机构成员视角
+    if same_institution:
+        if user.has_role(Role.INSTITUTION_ADMIN):
+            return None  # 管理员可见本机构全部材料
+        if user.has_role(Role.INSTITUTION_SUBMITTER):
+            return DENIED_SENSITIVE_RESTRICTED if is_sensitive else None
+        return DENIED_ROLE_NOT_PERMITTED
+
+    # 跨机构：只有“仍被有效分配到该包”的评审人可见
+    if user.has_role(Role.REVIEWER):
+        if entry.package_id in active_request_package_ids:
+            return None
+        return DENIED_NO_ACTIVE_ASSIGNMENT
+    return DENIED_CROSS_INSTITUTION
 
 
 def package_institution(entry: PackageEntry, package: ReviewPackage | None) -> str | None:
