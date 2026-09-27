@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ..application.evidence_service import EvidenceService
+from ..application.export_service import ExportService
 from ..application.package_service import PackageService
 from ..application.review_service import ReviewService
 from ..application.ports import Clock, IdGenerator, SystemClock, Uuid4IdGenerator
@@ -16,6 +17,8 @@ class ApplicationContext:
         *,
         clock: Clock | None = None,
         ids: IdGenerator | None = None,
+        export_authorizer=None,
+        export_sanitizer=None,
     ) -> None:
         self.db_path = db_path
         self.repo: Repository = SqliteRepository(db_path)
@@ -24,6 +27,13 @@ class ApplicationContext:
         self.evidence = EvidenceService(self.repo, self.clock, self.ids)
         self.packages = PackageService(self.repo, self.clock, self.ids)
         self.reviews = ReviewService(self.repo, self.clock, self.ids)
+        self.exports = ExportService(
+            self.repo,
+            self.clock,
+            self.ids,
+            authorizer=export_authorizer,
+            sanitizer=export_sanitizer,
+        )
 
     def close(self) -> None:
         self.repo.close()

@@ -394,6 +394,28 @@ class ApiHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    # ----------------------------------------------------- 受控批量导出
+    def create_export(self) -> None:
+        actor = self._actor()
+        body = self._read_json()
+        records = body.get("records")
+        if not isinstance(records, list):
+            from ..domain.errors import ValidationError
+
+            raise ValidationError("records 必须是数组")
+        result = self.services.exports.export_batch(
+            actor,
+            records,
+            purpose=body.get("purpose", ""),
+            idempotency_key=self._idempotency_key(),
+        )
+        # 被拒记录是逐条授权的正常结果，整体仍返回 200（清单内体现每条状态）
+        self._send_json(200, result)
+
+    def get_export(self, batch_id: str) -> None:
+        actor = self._actor()
+        self._send_json(200, self.services.exports.get_batch(actor, batch_id))
+
 
 # 路由表：方法 -> [(路径模式, 处理方法名)]
 def _routes() -> dict[str, list[tuple[str, str]]]:
@@ -413,6 +435,7 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
         ("/v1/requests/{request_id}/respond", "respond_request"),
         ("/v1/requests/{request_id}/objections", "create_objection"),
         ("/v1/requests/{request_id}/verdict", "submit_verdict"),
+        ("/v1/exports", "create_export"),
     ]
     get = [
         ("/v1/materials/{material_id}", "get_material"),
@@ -424,6 +447,7 @@ def _routes() -> dict[str, list[tuple[str, str]]]:
             "/v1/packages/{package_id}/entries/{version_id}/content",
             "download_entry",
         ),
+        ("/v1/exports/{batch_id}", "get_export"),
     ]
     return {"POST": post, "GET": get}
 

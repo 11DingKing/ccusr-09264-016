@@ -12,6 +12,8 @@ from contextlib import AbstractContextManager
 from ..domain.models import (
     AuditEntry,
     Blob,
+    ExportBatch,
+    ExportItem,
     Material,
     MaterialVersion,
     Objection,
@@ -148,3 +150,28 @@ class Repository(abc.ABC):
     def list_audit(
         self, package_id: str | None = None, limit: int = 200
     ) -> list[AuditEntry]: ...
+
+    # ---- 受控批量导出清单 ----
+    @abc.abstractmethod
+    def insert_export_batch(self, batch: ExportBatch) -> None: ...
+
+    @abc.abstractmethod
+    def get_export_batch(self, batch_id: str) -> ExportBatch | None: ...
+
+    @abc.abstractmethod
+    def insert_export_item(self, item: ExportItem) -> None: ...
+
+    @abc.abstractmethod
+    def list_export_items(self, batch_id: str) -> list[ExportItem]: ...
+
+    @abc.abstractmethod
+    def update_export_batch_counts(
+        self,
+        batch_id: str,
+        *,
+        exported: int,
+        denied: int,
+        errored: int,
+        completed_at: str | None,
+    ) -> bool:
+        """条件更新批次汇总；completed_at 非空时仅允许从未完成态推进。"""

@@ -46,6 +46,23 @@
 - 截止时间以“当地时间 + IANA 时区”输入，统一换算为 UTC 绝对时刻，正确
   处理跨时区与日界线。
 
+### 受控批量导出（逐条授权）
+- 大量记录脱敏导出时**逐条调用 Python 授权器**
+  `authorizer(user, record)`，可返回 `AuthorizationDecision`（携带字段
+  白名单）或裸 `bool`；授权器抛错、返回非法类型一律**失败关闭按拒绝**，
+  不会“出错放行”。默认授权器复用机构隔离 + 角色的最小披露策略，也可在
+  `ApplicationContext(export_authorizer=...)` 注入自定义判断。
+- **被拒记录不泄露字段**：拒绝路径不进入脱敏阶段，返回值与 SQLite 清单
+  行只含 `record_id` 与稳定分类码（`denied` / `cross_institution` /
+  `sensitive_forbidden` / `authorizer_error` 等），`fields` 与内容指纹
+  均为 `NULL`；`export_items` 表以 CHECK 约束在存储层强制该不变量。
+- **单条失败不阻塞其他条目**：批次行单独事务提交，之后每条记录的结果在
+  独立事务写入并立即提交；某条写失败只回滚该条（降级为
+  `error`/`manifest_write_error`），其余条目照常导出，最后单独事务汇总。
+- 可选脱敏器（`export_sanitizer=`，如 `make_field_redactor([...])`）只
+  接收已授权记录；授权字段白名单在脱敏器输出之后再投影一次，防止有缺陷
+  的脱敏器带出未授权字段。放行字段以规范化 JSON + SHA-256 留指纹。
+
 ## 分层结构
 
 ```
@@ -106,6 +123,8 @@ python3 -m service_09252_006.cli verify --db ./data/qe.db [--json]
 | POST | `/v1/requests/{id}/verdict` | 提交 approve/object（object 须先有异议） |
 | POST | `/v1/requests/{id}/cancel` | 取消分配（即时收回敏感访问权） |
 | POST | `/v1/packages/{id}/decision` | 签发 approved/needs_revision/rejected |
+| POST | `/v1/exports` | 受控批量导出：逐条授权 + 脱敏，写 SQLite 清单 |
+| GET  | `/v1/exports/{batch_id}` | 查看导出清单（发起人/审计/权威机构） |
 
 评审状态机：`draft → sealed → under_review → decided`；复审包重新走一遍，
 旧包不复活。
@@ -120,7 +139,8 @@ python3 -m compileall -q service_09252_006 tests
 覆盖：内容寻址与版本链、封存不变量、**材料撤回**（封存前后）、后补材料
 只能复审、**最小披露与权限变化**（取消/拒绝/角色调整/跨机构）、
 **跨时区截止**（上海/伦敦/洛杉矶）、异议与签发约束、幂等重放与失败重试、
-多连接**并发复审**、离线核验对字节/清单/评审篡改的检出，以及完整 HTTP
-端到端流程。
+多连接**并发复审**、**受控批量导出**（逐条授权失败关闭、拒绝项不落字段、
+单条失败不阻塞、脱敏与白名单、HTTP 端到端）、离线核验对字节/清单/评审
+篡改的检出，以及完整 HTTP 端到端流程。
 
 扩展模块覆盖证据、审批、权限、留存、对账与恢复等业务边界。

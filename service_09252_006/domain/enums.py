@@ -49,3 +49,9 @@ class Decision(str, Enum):
     APPROVED = "approved"
     NEEDS_REVISION = "needs_revision"
     REJECTED = "rejected"
+
+
+class ExportItemStatus(str, Enum):
+    EXPORTED = "exported"  # 授权通过，字段已脱敏导出并写入清单
+    DENIED = "denied"      # 授权拒绝，清单只留稳定分类码，不写字段
+    ERROR = "error"        # 处理失败（如清单写入失败），同样不写字段

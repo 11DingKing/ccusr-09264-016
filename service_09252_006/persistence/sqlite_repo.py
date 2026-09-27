@@ -18,6 +18,8 @@ from ..domain.fingerprint import digest_bytes
 from ..domain.models import (
     AuditEntry,
     Blob,
+    ExportBatch,
+    ExportItem,
     Material,
     MaterialVersion,
     Objection,
@@ -27,7 +29,7 @@ from ..domain.models import (
     User,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SqliteRepository(Repository):
@@ -51,9 +53,10 @@ class SqliteRepository(Repository):
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SCHEMA_VERSION:
             return
-        # executescript 会自行提交事务；把 user_version 写入放在同一脚本
-        self._conn.executescript(
-            """
+        if version < 1:
+            # executescript 会自行提交事务
+            self._conn.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS users (
                     user_id        TEXT PRIMARY KEY,
                     institution_id TEXT,
@@ -177,6 +180,59 @@ class SqliteRepository(Repository):
                 );
 
                 PRAGMA user_version = 1;
+            """
+        )
+        if version < 2:
+            # 受控批量导出清单：批次汇总 + 逐条授权结果。
+            # 存储层强制安全不变量：
+            #   exported 行必须带脱敏字段与内容指纹、原因码为 ok；
+            #   denied/error 行 fields_json/sha256 必须为 NULL——
+            #   被拒/失败记录的任何字段都不可能落盘。
+            # (batch_id, record_id) 唯一：同批重复提交同一记录只生效一次。
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS export_batches (
+                    batch_id     TEXT PRIMARY KEY,
+                    requested_by TEXT NOT NULL,
+                    purpose      TEXT NOT NULL DEFAULT '',
+                    created_at   TEXT NOT NULL,
+                    completed_at TEXT,
+                    total        INTEGER NOT NULL DEFAULT 0,
+                    exported     INTEGER NOT NULL DEFAULT 0,
+                    denied       INTEGER NOT NULL DEFAULT 0,
+                    errored      INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS export_items (
+                    item_id      TEXT PRIMARY KEY,
+                    batch_id     TEXT NOT NULL REFERENCES export_batches(batch_id),
+                    record_id    TEXT NOT NULL,
+                    seq          INTEGER NOT NULL,
+                    kind         TEXT NOT NULL,
+                    sensitivity  TEXT NOT NULL,
+                    status       TEXT NOT NULL,
+                    reason_code  TEXT NOT NULL,
+                    fields_json  TEXT,
+                    sha256       TEXT,
+                    decided_at   TEXT NOT NULL,
+                    UNIQUE(batch_id, seq),
+                    UNIQUE(batch_id, record_id),
+                    CHECK (
+                        (status = 'exported'
+                            AND fields_json IS NOT NULL
+                            AND sha256 IS NOT NULL
+                            AND reason_code = 'ok')
+                        OR
+                        (status IN ('denied', 'error')
+                            AND fields_json IS NULL
+                            AND sha256 IS NULL
+                            AND reason_code != 'ok')
+                    )
+                );
+                CREATE INDEX IF NOT EXISTS idx_export_items_batch
+                    ON export_items(batch_id, seq);
+
+                PRAGMA user_version = 2;
             """
         )
 
@@ -667,6 +723,87 @@ class SqliteRepository(Repository):
             for r in rows
         ]
 
+    # ----------------------------------------------------- 受控批量导出清单
+    def insert_export_batch(self, batch: ExportBatch) -> None:
+        self._conn.execute(
+            "INSERT INTO export_batches(batch_id, requested_by, purpose, created_at,"
+            " completed_at, total, exported, denied, errored)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                batch.batch_id,
+                batch.requested_by,
+                batch.purpose,
+                batch.created_at,
+                batch.completed_at,
+                batch.total,
+                batch.exported,
+                batch.denied,
+                batch.errored,
+            ),
+        )
+
+    def get_export_batch(self, batch_id: str) -> ExportBatch | None:
+        row = self._conn.execute(
+            "SELECT * FROM export_batches WHERE batch_id = ?", (batch_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return ExportBatch(
+            batch_id=row["batch_id"],
+            requested_by=row["requested_by"],
+            purpose=row["purpose"],
+            created_at=row["created_at"],
+            completed_at=row["completed_at"],
+            total=row["total"],
+            exported=row["exported"],
+            denied=row["denied"],
+            errored=row["errored"],
+            items=self.list_export_items(batch_id),
+        )
+
+    def insert_export_item(self, item: ExportItem) -> None:
+        self._conn.execute(
+            "INSERT INTO export_items(item_id, batch_id, record_id, seq, kind,"
+            " sensitivity, status, reason_code, fields_json, sha256, decided_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                item.item_id,
+                item.batch_id,
+                item.record_id,
+                item.seq,
+                item.kind,
+                item.sensitivity,
+                item.status,
+                item.reason_code,
+                item.fields_json,
+                item.sha256,
+                item.decided_at,
+            ),
+        )
+
+    def list_export_items(self, batch_id: str) -> list[ExportItem]:
+        rows = self._conn.execute(
+            "SELECT * FROM export_items WHERE batch_id = ? ORDER BY seq",
+            (batch_id,),
+        ).fetchall()
+        return [_row_to_export_item(r) for r in rows]
+
+    def update_export_batch_counts(
+        self,
+        batch_id: str,
+        *,
+        exported: int,
+        denied: int,
+        errored: int,
+        completed_at: str | None,
+    ) -> bool:
+        cur = self._conn.execute(
+            "UPDATE export_batches SET exported = ?, denied = ?, errored = ?,"
+            " completed_at = ? WHERE batch_id = ? AND completed_at IS NULL",
+            (exported, denied, errored, completed_at, batch_id),
+        )
+        return cur.rowcount == 1
+
 
 def _row_to_user(row: sqlite3.Row) -> User:
     return User(
@@ -716,4 +853,20 @@ def _row_to_entry(row: sqlite3.Row) -> PackageEntry:
         kind=row["kind"],
         sensitivity=row["sensitivity"],
         added_at=row["added_at"],
+    )
+
+
+def _row_to_export_item(row: sqlite3.Row) -> ExportItem:
+    return ExportItem(
+        item_id=row["item_id"],
+        batch_id=row["batch_id"],
+        record_id=row["record_id"],
+        seq=row["seq"],
+        kind=row["kind"],
+        sensitivity=row["sensitivity"],
+        status=row["status"],
+        reason_code=row["reason_code"],
+        fields_json=row["fields_json"],
+        sha256=row["sha256"],
+        decided_at=row["decided_at"],
     )

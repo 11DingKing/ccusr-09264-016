@@ -146,5 +146,43 @@ class AuditEntry:
     detail: dict = field(default_factory=dict)
 
 
+@dataclass
+class ExportItem:
+    """受控批量导出清单中的一条记录级结果。
+
+    关键安全约束：当 status 为 denied/error 时 fields 必须为 None（或空），
+    清单只暴露 record_id、kind、sensitivity 与稳定拒绝码，不泄露被拒
+    记录的任何字段；exported 时 fields 只包含脱敏后的值。
+    """
+
+    item_id: str
+    batch_id: str
+    record_id: str
+    seq: int
+    kind: str
+    sensitivity: str
+    status: str                    # ExportItemStatus
+    reason_code: str               # 授权通过=ok；拒绝/失败为稳定分类码
+    fields_json: Optional[str]     # 脱敏字段（仅 exported 非空），规范化 JSON
+    sha256: Optional[str]          # 导出字段内容指纹（仅 exported 非空）
+    decided_at: str
+
+
+@dataclass
+class ExportBatch:
+    """一次受控批量导出：逐条授权 + 逐条独立提交的 SQLite 清单。"""
+
+    batch_id: str
+    requested_by: str
+    purpose: str
+    created_at: str
+    completed_at: Optional[str]
+    total: int
+    exported: int
+    denied: int
+    errored: int
+    items: list[ExportItem] = field(default_factory=list)
+
+
 def asdict(obj) -> dict:
     return dataclasses.asdict(obj)
